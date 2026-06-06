@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>Movie Recommendation Agent</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="page">
+        <div class="chat-container">
+            <header>
+                <h1>🎬 Movie Recommendation Agent</h1>
+                <p>סוכן AI להמלצות סרטים וניתוח מגמות</p>
+            </header>
+
+            <div id="chat-box" class="chat-box">
+                <div class="message agent">
+                    היי! אני סוכן המלצות סרטים 🎬<br>
+                    אפשר לכתוב לי חופשי מה בא לך לראות.<br><br>
+                    דוגמאות:<br>
+                    • בא לי סרט מצחיק והרפתקני<br>
+                    • recommend a sci-fi movie about space<br>
+                    • similar to Toy Story<br>
+                    • show trends<br>
+                </div>
+            </div>
+
+            <form id="chat-form">
+                <input type="text" id="user-input" placeholder="כתבי הודעה לסוכן..." autocomplete="off" required>
+                <button type="submit">שליחה</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const chatBox = document.getElementById("chat-box");
+        const chatForm = document.getElementById("chat-form");
+        const userInput = document.getElementById("user-input");
+
+        function addMessage(text, classes) {
+            const messageDiv = document.createElement("div");
+
+            messageDiv.classList.add("message");
+
+            const classList = classes.split(" ");
+            classList.forEach(function(className) {
+                if (className.trim() !== "") {
+                    messageDiv.classList.add(className);
+                }
+            });
+
+            messageDiv.innerText = text;
+            chatBox.appendChild(messageDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            return messageDiv;
+        }
+
+        chatForm.addEventListener("submit", async function(event) {
+            event.preventDefault();
+
+            const message = userInput.value.trim();
+
+            if (!message) {
+                return;
+            }
+
+            addMessage(message, "user");
+            userInput.value = "";
+
+            const loadingMessage = addMessage("חושב על המלצה מתאימה...", "agent loading");
+
+            try {
+                const response = await fetch("/chat", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ message: message })
+                });
+
+                const data = await response.json();
+
+                loadingMessage.remove();
+
+                addMessage(data.reply, "agent");
+
+            } catch (error) {
+                loadingMessage.remove();
+
+                addMessage(
+                    "אירעה שגיאה בשליחת ההודעה לסוכן. בדקי שהשרת עדיין רץ ב-VS Code.",
+                    "agent"
+                );
+
+                console.error("Chat error:", error);
+            }
+        });
+    </script>
+</body>
+</html>
