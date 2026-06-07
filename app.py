@@ -5,12 +5,14 @@ Movie Recommendation AI Agent
 Stable final version for the AI/ML project.
 
 Main behavior:
-1. Understands a free text movie request in Hebrew/English.
+1. Understands a free text movie request in Hebrew/English (Natural Language Processing).
 2. Saves the user's filters while asking whether the user wants home viewing or cinema.
 3. After the user chooses home/cinema, it keeps the original filters.
 4. Searches the local CSV first for every movie-related request.
 5. Uses Gemini only as an internal fallback when the local CSV cannot answer.
 6. Does not expose to the user whether the answer came from CSV or Gemini.
+7. Hybrid pipeline: Filters simple system words locally to save API quota, while 
+   fully relying on Gemini for free-form natural language and heavy spelling mistakes.
 """
 
 import os
@@ -208,8 +210,6 @@ def ask_genre_question(session_id: str, user_text: str, viewing_mode: str) -> st
 
 def save_last_context(session_id: str, user_text: str, viewing_mode: str = "") -> None:
     state = get_state(session_id)
-    # Viewing mode is stored separately so changing from home to cinema later
-    # does not leave conflicting instructions inside the movie preferences.
     clean_context = re.sub(r"\.?\s*בחירת צפייה:\s*(?:home|cinema)\.?", "", user_text, flags=re.IGNORECASE).strip()
     state["last_movie_context"] = clean_context
     if viewing_mode:
@@ -267,7 +267,6 @@ def has_genre_or_style_preferences(user_text: str) -> bool:
 
 
 def is_recommendation_followup_filter(user_text: str) -> bool:
-    """True for constraints that naturally refine the active recommendation."""
     return bool(
         extract_runtime_filter(user_text) != (0, 1000)
         or extract_min_rating(user_text) is not None
@@ -277,7 +276,6 @@ def is_recommendation_followup_filter(user_text: str) -> bool:
 
 
 def is_collection_recommendation_filter(user_text: str) -> bool:
-    """Distinguish list filtering from a detail question about one movie."""
     text = normalize_user_text(user_text).lower()
     collection_terms = [
         "סרטים", "תמליץ", "תמליצי", "להמליץ", "המלצות",
@@ -287,7 +285,6 @@ def is_collection_recommendation_filter(user_text: str) -> bool:
 
 
 def is_genre_or_style_only(user_text: str) -> bool:
-    """True when the user supplied a genre/style but did not start a new request."""
     text = normalize_user_text(user_text).lower()
     request_terms = [
         "סרט", "המלצה", "תמליץ", "רוצה", "אשמח", "בא לי",
@@ -400,15 +397,28 @@ def normalize_user_text(text: str) -> str:
 
 def detect_requested_genres(user_text: str) -> List[str]:
     text = normalize_user_text(user_text).lower()
+    words = re.findall(r"[א-תa-zA-Z0-9+׳'-]+", text)
     detected: List[str] = []
+    
+    hebrew_prefixes = ("ב", "ל", "ה", "ו", "כ", "מ", "ש")
+
     for genre, keywords in GENRE_MAP.items():
         for keyword in keywords:
-            pattern = r"(?<!\w)" + re.escape(keyword.lower()) + r"(?!\w)"
-            if re.search(pattern, text):
-                detected.append(genre)
-                break
-    # If the user asks for children/family comedy, keep both filters.
-    return detected
+            kw_lower = keyword.lower()
+            for word in words:
+                if word == kw_lower:
+                    detected.append(genre)
+                    break
+                if len(word) > 2 and word.startswith(hebrew_prefixes):
+                    if word[1:] == kw_lower:
+                        detected.append(genre)
+                        break
+                    if len(word) > 3 and word[1:].startswith(hebrew_prefixes):
+                        if word[2:] == kw_lower:
+                            detected.append(genre)
+                            break
+                            
+    return list(set(detected))
 
 
 def extract_requested_actor(user_text: str) -> Optional[str]:
@@ -418,28 +428,26 @@ def extract_requested_actor(user_text: str) -> Optional[str]:
         if alias.lower() in text:
             return actor
 
-    # English: with Adam Sandler / actor Adam Sandler / starring Adam Sandler
-    english_match = re.search(
-        r"(?:with|actor|actress|starring|starred by)\s+([a-zA-Z][a-zA-Z'\-]+(?:\s+[a-zA-Z][a-zA-Z'\-]+){0,3})",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if english_match:
-        return english_match.group(1).strip().title()
-
-    # Hebrew actor requests. A generic "עם" is intentionally excluded so
-    # phrases such as "עם הבן שלי" are not mistaken for an actor name.
     hebrew_match = re.search(
-        r"(?:שחקן|שחקנית|בכיכוב|בכיכובה|בכיכובו)\s+([א-ת׳'\-]+(?:\s+[א-ת׳'\-]+){0,3})",
+        r"(?:שחקן|שחקנית|בכיכוב|בכיכובה|בכיכובו|עם)\s+([א-ת׳'\-]+(?:\s+[א-ת׳'\-]+){0,2})",
         text,
     )
     if hebrew_match:
         candidate = hebrew_match.group(1).strip(" .,!?:;\"'")
         candidate = re.split(r"\s+(?:באורך|בזאנר|בז׳אנר|ודירוג|דירוג|מעל|מתחת|עד|של|בבית|בקולנוע)", candidate)[0].strip()
-        for alias, actor in ACTOR_ALIASES.items():
-            if candidate and (candidate in alias.lower() or alias.lower() in candidate):
-                return actor
-        return candidate
+        
+        known_aliases = list(ACTOR_ALIASES.keys())
+        close_matches = difflib.get_close_matches(candidate, known_aliases, n=1, cutoff=0.7)
+        if close_matches:
+            return ACTOR_ALIASES[close_matches[0]]
+
+    english_match = re.search(
+        r"(?:with|actor|actress|starring|starred by)\s+([a-zA-Z][a-zA-Z'\-]+(?:\s+[a-zA-Z][a-zA-Z'\-]+){0,2})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if english_match:
+        return english_match.group(1).strip().title()
 
     return None
 
@@ -532,8 +540,6 @@ def extract_age_filter(text: str) -> Tuple[Optional[int], Optional[int], Optiona
         max_age = 16
         description = "מתאים לנוער"
 
-    # Numeric age filters are applied only when the user explicitly talks about age.
-    # This prevents "מעל 90 דקות" from being misread as "מעל גיל 90".
     if has_age_context:
         nums = [int(x) for x in re.findall(r"\d+", text)]
         if nums:
@@ -553,7 +559,6 @@ def extract_age_filter(text: str) -> Tuple[Optional[int], Optional[int], Optiona
 
 def detect_viewing_preference(text: str) -> str:
     text = normalize_user_text(text).lower().strip()
-    # Current user answer gets priority over previous context.
     if re.search(r"\b(home|streaming)\b", text) or any(term in text for term in ["בבית", "בית", "סטרימינג", "טלויזיה", "טלוויזיה"]):
         return "home"
     if re.search(r"\b(cinema|theater|theatre|now playing)\b", text) or any(term in text for term in ["בקולנוע", "קולנוע", "הקרנה", "מוקרנים", "מוקרן"]):
@@ -689,7 +694,7 @@ def search_movie_index(movie_title: Optional[str]) -> Optional[int]:
     return None
 
 # ----------------------------------------------------------------------
-# Gemini helpers
+# Gemini helpers (Optimized to prevent 429 Quota limits)
 # ----------------------------------------------------------------------
 
 def get_valid_gemini_api_key() -> Optional[str]:
@@ -712,11 +717,7 @@ def model_fallback_list() -> List[str]:
     if env_fallbacks:
         models += [m.strip() for m in env_fallbacks.split(",") if m.strip()]
     else:
-       models += [
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite"
-    ]
+        models += ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
     unique = []
     for model in models:
         if model and model not in unique:
@@ -739,10 +740,6 @@ def generate_with_gemini(contents: str, use_google_search: bool = False) -> Opti
         try:
             kwargs = {"model": model_name, "contents": contents}
 
-            # For cinema requests we need fresh now-playing information.
-            # The official Google GenAI SDK way is to pass a GoogleSearch tool
-            # through GenerateContentConfig. This makes Gemini ground the answer
-            # with current web results instead of relying on old model knowledge.
             if use_google_search:
                 if types is not None:
                     grounding_tool = types.Tool(google_search=types.GoogleSearch())
@@ -772,10 +769,15 @@ def generate_with_gemini(contents: str, use_google_search: bool = False) -> Opti
 
 
 def normalize_intent_with_gemini(user_text: str) -> str:
-    """Correct free-form spelling for intent parsing without answering the user."""
+    """Correct free-form spelling for complex structural queries to save quota."""
     original = str(user_text or "").strip()
     if not original or not get_valid_gemini_api_key() or genai is None:
         return original
+        
+    # Hybrid Guardrail: Do not send simple greetings or thanks to the API
+    if is_greeting(original) or is_thanks(original):
+        return original
+        
     if original in INTENT_NORMALIZATION_CACHE:
         return INTENT_NORMALIZATION_CACHE[original]
 
@@ -791,8 +793,6 @@ Message:
     if corrected:
         corrected = corrected.strip().strip('"').strip("'")
         if corrected and len(corrected) <= max(300, len(original) * 3):
-            # Typo correction must never erase preferences that were already
-            # explicit in the user's message.
             original_genres = set(detect_requested_genres(original))
             corrected_genres = set(detect_requested_genres(corrected))
             original_viewing = detect_viewing_preference(original)
@@ -810,7 +810,6 @@ Message:
 
 
 def infer_viewing_preference_with_gemini(user_text: str) -> str:
-    """Classify an unclear free-form answer by meaning, including typos."""
     text = str(user_text or "").strip()
     if not text or not get_valid_gemini_api_key() or genai is None:
         return "unclear"
@@ -921,8 +920,6 @@ Task:
     answer = generate_with_gemini(prompt, use_google_search=cinema)
     if answer:
         cleaned = clean_user_answer(answer)
-        # A cinema answer is useful only when it contains a verifiable current
-        # showtime/cinema source. Reject generic model-knowledge movie lists.
         if not cinema or re.search(r"https?://", cleaned, flags=re.IGNORECASE):
             return cleaned
     if cinema:
@@ -973,7 +970,6 @@ def apply_strict_filters(user_text: str) -> Tuple[np.ndarray, List[str]]:
     details = []
 
     if requested_genres:
-        # Hard genre filter: every returned movie must include at least one requested genre.
         genre_mask = df["genres_list"].apply(
             lambda genres: any(g in set(str(x).strip() for x in genres) for g in requested_genres)
         ).values
@@ -1060,7 +1056,6 @@ def recommend_by_movie(movie_title: Optional[str], n: int = 5) -> Tuple[str, str
 
 
 def find_confident_movie_sequels(movie_index: int) -> List[str]:
-    """Return only titles that clearly identify themselves as film sequels."""
     row = df.iloc[movie_index]
     base_title = str(row.get("title_no_year", "")).strip()
     if not base_title:
@@ -1131,9 +1126,6 @@ def get_movie_info(user_text: str, fallback_title: Optional[str] = None) -> Tupl
                 f"כן, קיימים סרטי המשך ל-{movie_title}:\n"
                 + "\n".join(f"- {title}" for title in sequels)
             ), "data_found"
-        # Similar words in a title do not prove a sequel relationship. Let
-        # Gemini distinguish an official film sequel from a TV spin-off or
-        # another unrelated title.
         return "", "data_missing"
     if asks_runtime:
         return f"האורך של {movie_title} הוא בערך {float(row.get('runtime', 0)):.0f} דקות.", "data_found"
@@ -1208,7 +1200,6 @@ def build_home_or_cinema_question(user_text: str) -> str:
         details.append("מגבלת גיל: " + age_description)
 
     details_text = "\n" + " | ".join(details) if details else ""
-    genre_question = "\nאיזה ז׳אנר או סגנון בא לך לראות?" if not genres else ""
     return (
         "מעולה 😊 כדי לתת לך המלצה רלוונטית, איפה תרצי/תרצה לראות את הסרט?"
         + details_text +
@@ -1220,8 +1211,6 @@ def build_home_or_cinema_question(user_text: str) -> str:
 
 
 def answer_recommendation(user_text: str, session_id: str, viewing_mode: str) -> str:
-    # Once a recommendation path starts, the home/cinema question has been
-    # answered and must not leak into later follow-up requests.
     get_state(session_id).pop("pending_recommendation_request", None)
     get_state(session_id).pop("pending_viewing_mode", None)
     get_state(session_id).pop("pending_needs_genre", None)
@@ -1241,8 +1230,6 @@ def answer_recommendation(user_text: str, session_id: str, viewing_mode: str) ->
             "כדי לבדוק אילו סרטים באמת מוקרנים עכשיו. נסי שוב בעוד רגע."
         )
 
-    # Home viewing searches the local dataset first, then asks Gemini only
-    # when no matching local movies exist.
     local_answer, status = recommend_from_csv(user_text)
     save_last_context(session_id, user_text, "home")
     if status == "data_found":
@@ -1310,10 +1297,17 @@ def thanks_response() -> str:
 
 def movie_agent(user_message: str, session_id: str = "local") -> str:
     raw_message = str(user_message or "").strip()
-    original_message = normalize_intent_with_gemini(raw_message)
-    if not original_message:
+    if not raw_message:
         return "כתבי לי איזה סרט בא לך לראות 🎬"
 
+    # Hybrid Step 1: Handle greetings and thanks locally to safeguard API Quotas
+    if is_greeting(raw_message):
+        return greeting_response()
+    if is_thanks(raw_message):
+        return thanks_response()
+
+    # Hybrid Step 2: Fully leverage Gemini for contextual natural language extraction
+    original_message = normalize_intent_with_gemini(raw_message)
     msg = normalize_user_text(original_message).lower()
     current_preference = detect_viewing_preference(original_message)
 
@@ -1327,9 +1321,6 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
             return local_answer
         return answer_movie_detail(pending_detail_question, session_id)
 
-    # Preserve an explicitly written movie title exactly as the user entered
-    # it. Gemini typo correction can otherwise alter uncommon titles before
-    # the local dataset lookup.
     raw_explicit_title = find_title_in_message(raw_message)
     if raw_explicit_title and is_detail_question(raw_message):
         save_focused_movie(session_id, raw_explicit_title)
@@ -1340,33 +1331,19 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
         combined_request = merge_with_movie_context(session_id, original_message)
         return answer_recommendation(combined_request, session_id, last_viewing_mode)
 
-    # A detail question has priority unless the user explicitly asks for
-    # recommendations that use the detail as a collection filter, such as
-    # "recommend movies rated above 9".
     if is_detail_question(original_message) and not has_recommendation_intent(original_message):
         return answer_movie_detail(original_message, session_id)
 
-    if is_greeting(original_message):
-        return greeting_response()
-
-    if is_thanks(original_message):
-        return thanks_response()
-
-    # Generic recommendation words must not turn an unrelated request into a movie request.
     if is_explicitly_non_movie_related(original_message):
         get_state(session_id).pop("pending_recommendation_request", None)
         return unrelated_response()
 
-    # A direct home/cinema answer is always a viewing choice, never a movie
-    # detail question. This also recovers if the development server restarted
-    # and lost an in-memory pending recommendation.
     if current_preference in {"home", "cinema"} and not get_state(session_id).get("pending_recommendation_request"):
         movie_context = get_last_context(session_id)
         if movie_context and has_genre_or_style_preferences(movie_context):
             return answer_recommendation(movie_context, session_id, current_preference)
         return ask_genre_question(session_id, movie_context or "המלצה על סרט", current_preference)
 
-    # We already know the viewing location and are waiting only for a genre/style.
     pending_viewing_mode = get_state(session_id).get("pending_viewing_mode")
     if pending_viewing_mode in {"home", "cinema"}:
         pending = pop_pending_request(session_id) or ""
@@ -1383,8 +1360,6 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
             return answer_recommendation(combined_request, session_id, "cinema")
         return ask_cinema_preferences(session_id, combined_request)
 
-    # A viewing-mode change in the middle of the conversation keeps all
-    # collected movie preferences and immediately searches using the new mode.
     if (
         current_preference in {"home", "cinema"}
         and get_last_context(session_id)
@@ -1394,7 +1369,6 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
         movie_context = pending_context or get_last_context(session_id)
         return answer_recommendation(movie_context, session_id, current_preference)
 
-    # 1. If we are waiting for home/cinema, combine the new answer with the original request.
     pending = pop_pending_request(session_id)
     if pending:
         pending_needs_genre = get_state(session_id).pop("pending_needs_genre", "0") == "1"
@@ -1405,22 +1379,16 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
             if pending_needs_genre:
                 return ask_genre_question(session_id, combined_request, current_preference)
             return answer_recommendation(combined_request, session_id, current_preference)
-        # User gave more filters instead of choosing. Keep everything and ask again.
         combined_request = f"{pending}. דרישה נוספת: {original_message}"
         save_pending_request(session_id, combined_request)
         return build_home_or_cinema_question(combined_request)
 
-    # Detail questions about the focused movie take priority over recommendation
-    # filters, especially questions containing words such as "שחקן".
     if is_detail_question(original_message) and (
         not has_recommendation_intent(original_message)
         or (get_focused_movie(session_id) and refers_to_focused_movie(original_message))
     ):
         return answer_movie_detail(original_message, session_id)
 
-    # Only clear refinement constraints continue the active recommendation.
-    # A new genre request starts a new recommendation and asks home/cinema.
-    last_viewing_mode = get_last_viewing_mode(session_id)
     if last_viewing_mode in {"home", "cinema"} and is_genre_or_style_only(str(user_message or "")):
         combined_request = merge_with_movie_context(session_id, original_message)
         return answer_recommendation(combined_request, session_id, last_viewing_mode)
@@ -1437,7 +1405,6 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
         combined_request = merge_with_movie_context(session_id, original_message)
         return answer_recommendation(combined_request, session_id, last_viewing_mode)
 
-    # 3. Similarity / analysis tasks.
     if any(term in msg for term in ["cluster", "clusters", "clustering", "קלאסטר", "אשכול"]):
         local, _ = describe_clusters()
         return local
@@ -1453,7 +1420,6 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
             return local
         return gemini_movie_fallback(original_message, "similar movie recommendation", cinema=False)
 
-    # 4. Recommendations: keep the request, ask home/cinema if not already specified.
     if has_recommendation_intent(original_message):
         state = get_state(session_id)
         state.pop("last_movie_context", None)
@@ -1467,7 +1433,6 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
         save_pending_request(session_id, original_message)
         return build_home_or_cinema_question(original_message)
 
-    # 5. Other movie-related questions: CSV first, then Gemini.
     if is_movie_related(original_message):
         return answer_movie_detail(original_message, session_id)
 
