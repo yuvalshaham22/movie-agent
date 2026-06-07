@@ -712,7 +712,11 @@ def model_fallback_list() -> List[str]:
     if env_fallbacks:
         models += [m.strip() for m in env_fallbacks.split(",") if m.strip()]
     else:
-        models += ["gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite"]
+       models += [
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
+    ]
     unique = []
     for model in models:
         if model and model not in unique:
