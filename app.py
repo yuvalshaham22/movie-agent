@@ -272,6 +272,16 @@ def is_recommendation_followup_filter(user_text: str) -> bool:
     )
 
 
+def is_genre_or_style_only(user_text: str) -> bool:
+    """True when the user supplied a genre/style but did not start a new request."""
+    text = normalize_user_text(user_text).lower()
+    request_terms = [
+        "סרט", "המלצה", "תמליץ", "רוצה", "אשמח", "בא לי",
+        "movie", "film", "recommend", "want",
+    ]
+    return has_genre_or_style_preferences(text) and not any(term in text for term in request_terms)
+
+
 def ask_cinema_preferences(session_id: str, user_text: str) -> str:
     save_last_context(session_id, user_text, "cinema")
     get_state(session_id)["waiting_for_cinema_preferences"] = "1"
@@ -885,7 +895,11 @@ Task:
 
     answer = generate_with_gemini(prompt, use_google_search=cinema)
     if answer:
-        return clean_user_answer(answer)
+        cleaned = clean_user_answer(answer)
+        # A cinema answer is useful only when it contains a verifiable current
+        # showtime/cinema source. Reject generic model-knowledge movie lists.
+        if not cinema or re.search(r"https?://", cleaned, flags=re.IGNORECASE):
+            return cleaned
     if cinema:
         return ""
     return "לא מצאתי התאמה מספיק טובה כרגע. נסי לדייק לי ז׳אנר, אורך, גיל או שחקן/שחקנית מועדפים."
@@ -1170,7 +1184,9 @@ def answer_recommendation(user_text: str, session_id: str, viewing_mode: str) ->
         save_last_context(session_id, user_text, "cinema")
         cinema_answer = gemini_movie_fallback(user_text, "current cinema movie recommendation", cinema=True)
         if cinema_answer:
+            get_state(session_id).pop("last_cinema_search_failed", None)
             return cinema_answer
+        get_state(session_id)["last_cinema_search_failed"] = "1"
         return (
             "שמרתי את ההעדפות שלך לקולנוע, אבל כרגע לא הצלחתי להתחבר לחיפוש האינטרנט "
             "כדי לבדוק אילו סרטים באמת מוקרנים עכשיו. נסי שוב בעוד רגע."
@@ -1250,7 +1266,7 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
     current_preference = detect_viewing_preference(original_message)
 
     pending_detail_question = get_state(session_id).pop("pending_movie_detail_question", None)
-    if pending_detail_question:
+    if pending_detail_question and current_preference == "unclear":
         supplied_title = original_message.strip().strip("?.!.,")
         save_focused_movie(session_id, supplied_title)
         combined_question = f"{pending_detail_question} הסרט הוא {supplied_title}"
@@ -1266,6 +1282,15 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
     if is_explicitly_non_movie_related(original_message):
         get_state(session_id).pop("pending_recommendation_request", None)
         return unrelated_response()
+
+    # A direct home/cinema answer is always a viewing choice, never a movie
+    # detail question. This also recovers if the development server restarted
+    # and lost an in-memory pending recommendation.
+    if current_preference in {"home", "cinema"} and not get_state(session_id).get("pending_recommendation_request"):
+        movie_context = get_last_context(session_id)
+        if movie_context and has_genre_or_style_preferences(movie_context):
+            return answer_recommendation(movie_context, session_id, current_preference)
+        return ask_genre_question(session_id, movie_context or "המלצה על סרט", current_preference)
 
     # We already know the viewing location and are waiting only for a genre/style.
     pending_viewing_mode = get_state(session_id).pop("pending_viewing_mode", None)
@@ -1321,6 +1346,14 @@ def movie_agent(user_message: str, session_id: str = "local") -> str:
     # Only clear refinement constraints continue the active recommendation.
     # A new genre request starts a new recommendation and asks home/cinema.
     last_viewing_mode = get_last_viewing_mode(session_id)
+    if (
+        last_viewing_mode == "cinema"
+        and get_state(session_id).pop("last_cinema_search_failed", None)
+        and has_genre_or_style_preferences(original_message)
+    ):
+        combined_request = merge_with_movie_context(session_id, original_message)
+        return answer_recommendation(combined_request, session_id, "cinema")
+
     if last_viewing_mode in {"home", "cinema"} and is_recommendation_followup_filter(original_message):
         combined_request = merge_with_movie_context(session_id, original_message)
         return answer_recommendation(combined_request, session_id, last_viewing_mode)
