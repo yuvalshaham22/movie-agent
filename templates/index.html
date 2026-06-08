@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b0b10">
+    <title>סרטלי AI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=8">
+</head>
+<body>
+    <main class="app-shell">
+        <section class="chat-container">
+            <header class="topbar">
+                <div class="brand">
+                    <div class="brand-icon" aria-hidden="true">▶</div>
+                    <div>
+                        <h1>סרטלי <span>AI</span></h1>
+                        <p><i></i> סוכן הסרטים החכם שלך</p>
+                    </div>
+                </div>
+                <button class="icon-button" id="clear-chat" type="button" aria-label="התחלת שיחה חדשה" title="שיחה חדשה">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a7 7 0 1 1-6.2 3.75M5 4v5h5"/></svg>
+                </button>
+            </header>
+
+            <div id="chat-box" class="chat-box">
+                <section class="welcome" id="welcome">
+                    <div class="hero-icon"><span>▶</span></div>
+                    <p class="eyebrow">הערב שלך מתחיל כאן</p>
+                    <h2>איזה סרט בא לך לראות?</h2>
+                    <p class="welcome-copy">ספרי לי מה מצב הרוח שלך, מי צופה איתך או איזה סרט אהבת, ואני אמצא את ההתאמה המושלמת.</p>
+                    <div class="suggestions">
+                        <button type="button" data-prompt="תפתיע אותי עם סרט מעולה">🎲 תפתיע אותי</button>
+                        <button type="button" data-prompt="בא לי סרט מצחיק">😂 משהו מצחיק</button>
+                        <button type="button" data-prompt="אני רוצה סרט אקשן">🔥 אקשן</button>
+                        <button type="button" data-prompt="בא לי סרט רומנטי">❤️ רומנטי</button>
+                        <button type="button" data-prompt="אני רוצה סרט מפחיד">👻 מפחיד</button>
+                        <button type="button" data-prompt="סרט שמתאים לכל המשפחה">🍿 לכל המשפחה</button>
+                    </div>
+                </section>
+            </div>
+
+            <div class="composer-wrap">
+                <form id="chat-form" class="composer">
+                    <input type="text" id="user-input" placeholder="שאלי אותי על סרטים..." autocomplete="off" required>
+                    <button id="send-button" class="send-button" type="submit" aria-label="שליחת הודעה">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6"/></svg>
+                    </button>
+                </form>
+                <p class="disclaimer">סרטלי יכול לטעות — תמיד כדאי לבדוק זמינות ודירוג גיל</p>
+            </div>
+        </section>
+    </main>
+
+    <template id="agent-message-template">
+        <div class="message-row agent-row">
+            <div class="avatar" aria-hidden="true">▶</div>
+            <div class="agent-content">
+                <div class="message agent"></div>
+            </div>
+        </div>
+    </template>
+
+    <script>
+        const chatBox = document.getElementById("chat-box");
+        const chatForm = document.getElementById("chat-form");
+        const userInput = document.getElementById("user-input");
+        const welcome = document.getElementById("welcome");
+        const clearChatButton = document.getElementById("clear-chat");
+        const agentTemplate = document.getElementById("agent-message-template");
+
+        const gradients = [
+            ["#3d184f", "#b33d68"], ["#142c54", "#286c9c"], ["#4a2417", "#bf6b32"],
+            ["#172c2b", "#307967"], ["#29184f", "#6d4ac2"]
+        ];
+
+        function scrollToBottom() {
+            chatBox.scrollTo({ top: chatBox.scrollHeight, behavior: "smooth" });
+        }
+
+        function hideWelcome() {
+            if (welcome) welcome.classList.add("is-hidden");
+        }
+
+        function addUserMessage(text) {
+            const row = document.createElement("div");
+            row.className = "message-row user-row";
+            const message = document.createElement("div");
+            message.className = "message user";
+            message.textContent = text;
+            row.appendChild(message);
+            chatBox.appendChild(row);
+            scrollToBottom();
+        }
+
+        function extractMovies(text) {
+            const blocks = text.split(/\n\s*\n/);
+            const movies = [];
+            blocks.forEach((block) => {
+                const titleMatch = block.match(/(?:🎬|נ¬)\s*(.+)/);
+                const ratingMatch = block.match(/(?:דירוג|׳“׳™׳¨׳•׳’):\s*([\d.]+)/);
+                const genreMatch = block.match(/(?:ז['׳]?אנר(?:ים)?|׳–׳³׳׳ ׳¨׳™׳):\s*(.+)/);
+                const runtimeMatch = block.match(/(?:אורך הסרט|׳׳•׳¨׳ך ׳”׳¡׳¨׳˜):\s*([^\n]+)/);
+                const cinemaMatch = block.match(/(?:קולנוע\/אזור|קולנוע|אזור):\s*([^\n]+)/);
+                const reasonMatch = block.match(/(?:למה זה מתאים):\s*([^\n]+)/);
+                const sourceMatch = block.match(/(?:מקור מאומת):\s*(https?:\/\/\S+)/);
+
+                if (titleMatch && (ratingMatch || genreMatch || cinemaMatch || reasonMatch)) {
+                    movies.push({
+                        title: titleMatch[1].trim(),
+                        rating: ratingMatch ? `★ ${ratingMatch[1]}` : "מוקרן עכשיו",
+                        genre: genreMatch ? genreMatch[1].replaceAll("|", " · ") : "סרט מומלץ",
+                        runtime: runtimeMatch ? runtimeMatch[1].trim().replace(/^([\d.]+)$/, "$1 דקות") : "",
+                        cinema: cinemaMatch ? cinemaMatch[1].trim() : "",
+                        reason: reasonMatch ? reasonMatch[1].trim() : "",
+                        source: sourceMatch ? sourceMatch[1].trim() : ""
+                    });
+                }
+            });
+            return movies.slice(0, 5);
+        }
+
+        function addMovieCards(container, movies) {
+            if (!movies.length) return;
+            const rail = document.createElement("div");
+            rail.className = "movie-rail";
+            movies.forEach((movie, index) => {
+                const card = document.createElement("article");
+                card.className = "movie-card";
+                card.style.setProperty("--card-from", gradients[index % gradients.length][0]);
+                card.style.setProperty("--card-to", gradients[index % gradients.length][1]);
+                const sourceHtml = movie.source
+                    ? `<a href="${escapeHtml(movie.source)}" target="_blank" rel="noopener noreferrer">בדיקת הקרנות</a>`
+                    : "";
+                card.innerHTML = `
+                    <div class="poster-art"><span>${index + 1}</span><b>▶</b></div>
+                    <div class="movie-info">
+                        <h3>${escapeHtml(movie.title)}</h3>
+                        <p>${escapeHtml(movie.genre)}</p>
+                        ${movie.reason ? `<p>${escapeHtml(movie.reason)}</p>` : ""}
+                        ${movie.cinema ? `<p>${escapeHtml(movie.cinema)}</p>` : ""}
+                        <div><strong>${escapeHtml(movie.rating)}</strong><span>${escapeHtml(movie.runtime)}</span></div>
+                        ${sourceHtml}
+                    </div>`;
+                rail.appendChild(card);
+            });
+            container.appendChild(rail);
+        }
+
+        function addAgentMessage(text, loading = false) {
+            const fragment = agentTemplate.content.cloneNode(true);
+            const row = fragment.querySelector(".message-row");
+            const content = fragment.querySelector(".agent-content");
+            const message = fragment.querySelector(".message");
+            if (loading) {
+                row.classList.add("loading-row");
+                message.classList.add("loading");
+                message.innerHTML = "<span></span><span></span><span></span>";
+            } else {
+                const movies = extractMovies(text);
+                if (movies.length) {
+                    message.remove();
+                    addMovieCards(content, movies);
+                } else {
+                    message.textContent = text;
+                }
+            }
+            chatBox.appendChild(fragment);
+            scrollToBottom();
+            return row;
+        }
+
+        function escapeHtml(value) {
+            const div = document.createElement("div");
+            div.textContent = value;
+            return div.innerHTML;
+        }
+
+        async function sendMessage(text) {
+            const message = text.trim();
+            if (!message) return;
+            hideWelcome();
+            addUserMessage(message);
+            userInput.value = "";
+            userInput.disabled = true;
+            const loadingRow = addAgentMessage("", true);
+
+            try {
+                const response = await fetch("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message })
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                loadingRow.remove();
+                addAgentMessage(data.reply || "לא מצאתי תשובה כרגע. נסי לנסח מחדש.");
+            } catch (error) {
+                loadingRow.remove();
+                addAgentMessage("אירעה שגיאה בחיבור לסוכן. בדקי שהשרת עדיין פועל ונסי שוב.");
+                console.error("Chat error:", error);
+            } finally {
+                userInput.disabled = false;
+                userInput.focus();
+            }
+        }
+
+        chatForm.addEventListener("submit", (event) => {
+            event.preventDefault();
+            sendMessage(userInput.value);
+        });
+
+        document.querySelectorAll("[data-prompt]").forEach((button) => {
+            button.addEventListener("click", () => sendMessage(button.dataset.prompt));
+        });
+
+        clearChatButton.addEventListener("click", () => window.location.reload());
+    </script>
+</body>
+</html>
